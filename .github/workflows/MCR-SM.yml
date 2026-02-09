@@ -146,6 +146,23 @@ jobs:
           Get-Content "$env:MANAGED_FOLDER\settings.json"
 
       # -------------------------
+      # AUTH TEST ENV
+      # -------------------------
+      - name: Authenticate to TEST
+        shell: pwsh
+        run: |
+          & $env:POWERPLATFORMTOOLS_PACPATH auth create `
+            --name test `
+            --applicationId "$env:AZURE_CLIENT_ID" `
+            --clientSecret "$env:AZURE_CLIENT_SECRET" `
+            --tenant "$env:AZURE_TENANT_ID" `
+            --environment "$env:TEST_ENV_URL" `
+            --accept-cleartext-caching
+
+          & $env:POWERPLATFORMTOOLS_PACPATH auth select --name test
+
+
+      # -------------------------
       # PATCH ONLY FLOW CONNECTION REFS
       # -------------------------
       - name: Patch ONLY flow connection refs
@@ -232,21 +249,6 @@ jobs:
           Write-Host "Patched settings file:"
           Get-Content $SETTINGS_FILE
 
-      # -------------------------
-      # AUTH TEST ENV
-      # -------------------------
-      - name: Authenticate to TEST
-        shell: pwsh
-        run: |
-          & $env:POWERPLATFORMTOOLS_PACPATH auth create `
-            --name test `
-            --applicationId "$env:AZURE_CLIENT_ID" `
-            --clientSecret "$env:AZURE_CLIENT_SECRET" `
-            --tenant "$env:AZURE_TENANT_ID" `
-            --environment "$env:TEST_ENV_URL" `
-            --accept-cleartext-caching
-
-          & $env:POWERPLATFORMTOOLS_PACPATH auth select --name test
 
       # -------------------------
       # IMPORT SOLUTION
