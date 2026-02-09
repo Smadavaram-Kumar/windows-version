@@ -169,35 +169,35 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "==== PATCH ONLY FLOW CONNECTION REFS ===="
+          $ErrorActionPreference = "Stop"
 
-          $WORKFLOW_DIR = Join-Path $env:UNPACKED_FOLDER "Workflows"
-          $SETTINGS_FILE = Join-Path $env:MANAGED_FOLDER "settings.json"
-          $TEST_ENV_URL = $env:TEST_ENV_URL
-          $PAC = $env:POWERPLATFORMTOOLS_PACPATH
+          $WORKFLOW_DIR  = Join-Path $env:UNPACKED_FOLDER "Workflows"
+          $SETTINGS_FILE = Join-Path $env:MANAGED_FOLDER  "settings.json"
+          $TEST_ENV_URL  = $env:TEST_ENV_URL
+          $PAC           = $env:POWERPLATFORMTOOLS_PACPATH
 
           # Extract logical names of flows
           $FLOW_CONN_REFS = "flow-connection-refs.txt"
 
           if (Test-Path $WORKFLOW_DIR) {
-              Get-ChildItem "$WORKFLOW_DIR\*.json" | ForEach-Object {
-                  $json = Get-Content $_.FullName | ConvertFrom-Json
-                  if ($json.properties.connectionReferences) {
-                      foreach ($p in $json.properties.connectionReferences.psobject.Properties) {
-                          $logicalName = $entry.Value.connection.connectionReferenceLogicalName
-                          if ($logicalName) {
-                              $logicalName
-                          }
-                      }
-                  }
-              } | Sort-Object -Unique | Out-File $FLOW_CONN_REFS -Encoding utf8
+            Get-ChildItem -Path $WORKFLOW_DIR -Filter "*.json" | ForEach-Object {
+              $json = Get-Content $_.FullName -Raw | ConvertFrom-Json
+              $connRefs = $json.properties.connectionReferences
+              if (-not $connRefs) { return }
+
+              foreach ($p in $connRefs.psobject.Properties) {
+                $logicalName = $p.Value.connection.connectionReferenceLogicalName
+                if ($logicalName) { $logicalName }
+              }
+            } | Sort-Object -Unique | Out-File $FLOW_CONN_REFS -Encoding utf8
           } else {
-              New-Item $FLOW_CONN_REFS -ItemType File -Force
+            "" | Out-File $FLOW_CONN_REFS -Encoding utf8
           }
 
           Write-Host "Flow logical names to patch:"
           Get-Content $FLOW_CONN_REFS
 
-          # List all connections in TEST environment
+          # List all connections in TEST environment (now that we're authenticated)
           $CONN_LIST_OUT = "test-connections.txt"
           & $PAC connection list --environment $TEST_ENV_URL | Out-File $CONN_LIST_OUT -Encoding utf8
 
@@ -212,40 +212,37 @@ jobs:
           $settings = Get-Content $TMP -Raw | ConvertFrom-Json
 
           Get-Content $FLOW_CONN_REFS | ForEach-Object {
-              $FLOW_LOGICAL = $_.Trim()
-              if (-not $FLOW_LOGICAL) { return }
+            $FLOW_LOGICAL = $_.Trim()
+            if (-not $FLOW_LOGICAL) { return }
 
-              Write-Host "Processing flow logical: $FLOW_LOGICAL"
+            Write-Host "Processing flow logical: $FLOW_LOGICAL"
 
-              $idx = $null
-              for ($i=0; $i -lt $settings.ConnectionReferences.Count; $i++) {
-                  if ($settings.ConnectionReferences[$i].LogicalName -eq $FLOW_LOGICAL) {
-                      $idx = $i
-                      break
-                  }
-              }
+            $idx = $null
+            for ($i = 0; $i -lt $settings.ConnectionReferences.Count; $i++) {
+              if ($settings.ConnectionReferences[$i].LogicalName -eq $FLOW_LOGICAL) { $idx = $i; break }
+            }
 
-              if ($idx -eq $null) {
-                  Write-Host "  Not found in settings.json, skipping."
-                  return
-              }
+            if ($idx -eq $null) {
+              Write-Host "  Not found in settings.json, skipping."
+              return
+            }
 
-              $connectorId = $settings.ConnectionReferences[$idx].ConnectorId
-              $connectorToken = Split-Path $connectorId -Leaf
-              Write-Host "  Searching for test connection for connector: $connectorToken"
+            $connectorId    = $settings.ConnectionReferences[$idx].ConnectorId
+            $connectorToken = Split-Path $connectorId -Leaf
+            Write-Host "  Searching for test connection for connector: $connectorToken"
 
-              $foundLine = Select-String -Path $CONN_LIST_OUT -Pattern [regex]::Escape($connectorId) | Select-Object -First 1
-              if ($foundLine) {
-                  $foundConnId = ($foundLine -split "\s+")[0]
-                  Write-Host "  Found connection id: $foundConnId"
-                  $settings.ConnectionReferences[$idx].ConnectionId = $foundConnId
-              } else {
-                  Write-Host "  WARNING: No matching connection id found for $connectorToken. Will remain blank."
-              }
+            $match = Select-String -Path $CONN_LIST_OUT -Pattern ([regex]::Escape($connectorId)) | Select-Object -First 1
+            if ($match) {
+              $foundConnId = (($match.Line -split "\s+")[0]).Trim()
+              Write-Host "  Found connection id: $foundConnId"
+              $settings.ConnectionReferences[$idx].ConnectionId = $foundConnId
+            } else {
+              Write-Host "  WARNING: No matching connection id found for $connectorToken. Will remain blank."
+            }
           }
 
           # Save patched settings.json
-          $settings | ConvertTo-Json -Depth 10 | Set-Content $SETTINGS_FILE -Encoding utf8
+          $settings | ConvertTo-Json -Depth 50 | Set-Content $SETTINGS_FILE -Encoding utf8
           Write-Host "Patched settings file:"
           Get-Content $SETTINGS_FILE
 
