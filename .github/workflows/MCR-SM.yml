@@ -1,0 +1,266 @@
+name: MCR-SM
+description: this workflow matches the target connections and updates the deployment setting file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      solution_name:
+        description: 'Solution unique name (not display name).'
+        required: true
+      solution_type:
+        description: 'Type of solution to import: managed or unmanaged'
+        required: true
+        default: 'unmanaged'
+        type: choice
+        options:
+          - managed
+          - unmanaged
+      dev_env_url:
+        description: 'Dev environment URL'
+        required: true
+      test_env_url:
+        description: 'Test environment URL'
+        required: true
+
+env:
+  # -------------------------
+  # SPN INFORMATION
+  # -------------------------
+  AZURE_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.PP_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+
+  DEV_ENV_URL: ${{ github.event.inputs.dev_env_url }}
+  TEST_ENV_URL: ${{ github.event.inputs.test_env_url }}
+
+  # -------------------------
+  # FOLDERS THAT WILL GET CREATED DURING WORKFLOW RUN
+  # -------------------------
+  EXPORT_FOLDER: exported
+  MANAGED_FOLDER: exported\managed
+  UNMANAGED_FOLDER: exported\unmanaged
+  UNPACKED_FOLDER: exported\unpacked
+
+  SOLUTION_ZIP_NAME: ${{ github.event.inputs.solution_name }}.zip
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    environment: production
+
+    steps:
+      # -------------------------
+      # CHECKOUT REPO
+      # -------------------------
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # -------------------------
+      # INSTALL POWER PLATFORM CLI
+      # -------------------------
+      - name: Install Power Platform CLI
+        uses: microsoft/powerplatform-actions/actions-install@v1
+
+      # -------------------------
+      # ENSURE FOLDERS EXIST
+      # -------------------------
+      - name: Ensure folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path `
+            "$env:EXPORT_FOLDER",
+            "$env:MANAGED_FOLDER",
+            "$env:UNMANAGED_FOLDER",
+            "$env:UNPACKED_FOLDER"
+
+      # -------------------------
+      # EXPORT UNMANAGED SOLUTION
+      # -------------------------
+      - name: Export UNMANAGED solution from DEV
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ env.DEV_ENV_URL }}
+          app-id: ${{ env.AZURE_CLIENT_ID }}
+          client-secret: ${{ env.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          solution-name: ${{ github.event.inputs.solution_name }}
+          solution-output-file: ${{ env.UNMANAGED_FOLDER }}\${{ env.SOLUTION_ZIP_NAME }}
+          managed: false
+
+      # -------------------------
+      # EXPORT MANAGED SOLUTION
+      # -------------------------
+      - name: Export MANAGED solution from DEV
+        uses: microsoft/powerplatform-actions/export-solution@v1
+        with:
+          environment-url: ${{ env.DEV_ENV_URL }}
+          app-id: ${{ env.AZURE_CLIENT_ID }}
+          client-secret: ${{ env.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          solution-name: ${{ github.event.inputs.solution_name }}
+          solution-output-file: ${{ env.MANAGED_FOLDER }}\${{ env.SOLUTION_ZIP_NAME }}
+          managed: true
+
+      # -------------------------
+      # UNPACK UNMANAGED SOLUTION
+      # -------------------------
+      - name: Unpack solution
+        shell: pwsh
+        run: |
+          & $env:POWERPLATFORMTOOLS_PACPATH solution unpack `
+            --zipfile "$env:UNMANAGED_FOLDER\$env:SOLUTION_ZIP_NAME" `
+            --folder "$env:UNPACKED_FOLDER" `
+            --allowDelete
+
+          Get-ChildItem -Recurse $env:UNPACKED_FOLDER
+
+      # -------------------------
+      # SHOW WORKFLOWS FILES
+      # -------------------------
+      - name: Show Workflows files
+        shell: pwsh
+        run: |
+          $wf = Join-Path $env:UNPACKED_FOLDER "Workflows"
+          if (Test-Path $wf) {
+              Get-ChildItem $wf -Recurse | ForEach-Object {
+                  Write-Host "`n--- FILE: $($_.FullName) ---"
+                  Get-Content $_.FullName
+              }
+          } else {
+              Write-Host "No Workflows folder"
+          }
+
+      # -------------------------
+      # CREATE DEPLOYMENT SETTINGS
+      # -------------------------
+      - name: Create deployment settings
+        shell: pwsh
+        run: |
+          & $env:POWERPLATFORMTOOLS_PACPATH solution create-settings `
+            --solution-zip "$env:MANAGED_FOLDER\$env:SOLUTION_ZIP_NAME" `
+            --settings-file "$env:MANAGED_FOLDER\settings.json"
+
+      - name: Display settings.json
+        shell: pwsh
+        run: |
+          Get-Content "$env:MANAGED_FOLDER\settings.json"
+
+      # -------------------------
+      # PATCH ONLY FLOW CONNECTION REFS
+      # -------------------------
+      - name: Patch ONLY flow connection refs
+        shell: pwsh
+        run: |
+          Write-Host "==== PATCH ONLY FLOW CONNECTION REFS ===="
+
+          $WORKFLOW_DIR = Join-Path $env:UNPACKED_FOLDER "Workflows"
+          $SETTINGS_FILE = Join-Path $env:MANAGED_FOLDER "settings.json"
+          $TEST_ENV_URL = $env:TEST_ENV_URL
+          $PAC = $env:POWERPLATFORMTOOLS_PACPATH
+
+          # Extract logical names of flows
+          $FLOW_CONN_REFS = "flow-connection-refs.txt"
+
+          if (Test-Path $WORKFLOW_DIR) {
+              Get-ChildItem "$WORKFLOW_DIR\*.json" | ForEach-Object {
+                  $json = Get-Content $_.FullName | ConvertFrom-Json
+                  if ($json.properties.connectionReferences) {
+                      foreach ($entry in $json.properties.connectionReferences.GetEnumerator()) {
+                          $logicalName = $entry.Value.connection.connectionReferenceLogicalName
+                          if ($logicalName) {
+                              $logicalName
+                          }
+                      }
+                  }
+              } | Sort-Object -Unique | Out-File $FLOW_CONN_REFS -Encoding utf8
+          } else {
+              New-Item $FLOW_CONN_REFS -ItemType File -Force
+          }
+
+          Write-Host "Flow logical names to patch:"
+          Get-Content $FLOW_CONN_REFS
+
+          # List all connections in TEST environment
+          $CONN_LIST_OUT = "test-connections.txt"
+          & $PAC connection list --environment $TEST_ENV_URL | Out-File $CONN_LIST_OUT -Encoding utf8
+
+          Write-Host "----------------------------------"
+          Write-Host "Connections pulled from target env"
+          Write-Host "----------------------------------"
+          Get-Content $CONN_LIST_OUT
+
+          # Patch only flows used
+          $TMP = "$SETTINGS_FILE.tmp"
+          Copy-Item $SETTINGS_FILE $TMP -Force
+          $settings = Get-Content $TMP -Raw | ConvertFrom-Json
+
+          Get-Content $FLOW_CONN_REFS | ForEach-Object {
+              $FLOW_LOGICAL = $_.Trim()
+              if (-not $FLOW_LOGICAL) { return }
+
+              Write-Host "Processing flow logical: $FLOW_LOGICAL"
+
+              $idx = $null
+              for ($i=0; $i -lt $settings.ConnectionReferences.Count; $i++) {
+                  if ($settings.ConnectionReferences[$i].LogicalName -eq $FLOW_LOGICAL) {
+                      $idx = $i
+                      break
+                  }
+              }
+
+              if ($idx -eq $null) {
+                  Write-Host "  Not found in settings.json, skipping."
+                  return
+              }
+
+              $connectorId = $settings.ConnectionReferences[$idx].ConnectorId
+              $connectorToken = Split-Path $connectorId -Leaf
+              Write-Host "  Searching for test connection for connector: $connectorToken"
+
+              $foundLine = Select-String -Path $CONN_LIST_OUT -Pattern [regex]::Escape($connectorId) | Select-Object -First 1
+              if ($foundLine) {
+                  $foundConnId = ($foundLine -split "\s+")[0]
+                  Write-Host "  Found connection id: $foundConnId"
+                  $settings.ConnectionReferences[$idx].ConnectionId = $foundConnId
+              } else {
+                  Write-Host "  WARNING: No matching connection id found for $connectorToken. Will remain blank."
+              }
+          }
+
+          # Save patched settings.json
+          $settings | ConvertTo-Json -Depth 10 | Set-Content $SETTINGS_FILE -Encoding utf8
+          Write-Host "Patched settings file:"
+          Get-Content $SETTINGS_FILE
+
+      # -------------------------
+      # AUTH TEST ENV
+      # -------------------------
+      - name: Authenticate to TEST
+        shell: pwsh
+        run: |
+          & $env:POWERPLATFORMTOOLS_PACPATH auth create `
+            --name test `
+            --applicationId "$env:AZURE_CLIENT_ID" `
+            --clientSecret "$env:AZURE_CLIENT_SECRET" `
+            --tenant "$env:AZURE_TENANT_ID" `
+            --environment "$env:TEST_ENV_URL" `
+            --accept-cleartext-caching
+
+          & $env:POWERPLATFORMTOOLS_PACPATH auth select --name test
+
+      # -------------------------
+      # IMPORT SOLUTION
+      # -------------------------
+      - name: Import solution
+        shell: pwsh
+        run: |
+          if ("${{ github.event.inputs.solution_type }}" -eq "managed") {
+            $solPath = "$env:MANAGED_FOLDER\$env:SOLUTION_ZIP_NAME"
+          } else {
+            $solPath = "$env:UNMANAGED_FOLDER\$env:SOLUTION_ZIP_NAME"
+          }
+
+          & $env:POWERPLATFORMTOOLS_PACPATH solution import `
+            --path $solPath `
+            --settings-file "$env:MANAGED_FOLDER\settings.json" `
+            --force-overwrite
