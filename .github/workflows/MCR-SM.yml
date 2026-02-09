@@ -165,7 +165,7 @@ jobs:
               Get-ChildItem "$WORKFLOW_DIR\*.json" | ForEach-Object {
                   $json = Get-Content $_.FullName | ConvertFrom-Json
                   if ($json.properties.connectionReferences) {
-                      foreach ($entry in $json.properties.connectionReferences.GetEnumerator()) {
+                      foreach ($p in $json.properties.connectionReferences.psobject.Properties) {
                           $logicalName = $entry.Value.connection.connectionReferenceLogicalName
                           if ($logicalName) {
                               $logicalName
